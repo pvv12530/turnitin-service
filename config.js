@@ -19,6 +19,12 @@ const config = {
    */
   essayStorageBucket: process.env.ESSAY_STORAGE_BUCKET || null,
 
+  /**
+   * Supabase Storage bucket name to upload MyPlag reports into.
+   * If unset, we try to infer it from ESSAY_STORAGE_BUCKET (public URL).
+   */
+  reportsStorageBucketName: process.env.REPORTS_STORAGE_BUCKET_NAME || null,
+
   mplagStatusPollMs: process.env.MPLAG_STATUS_POLL_MS
     ? parseInt(process.env.MPLAG_STATUS_POLL_MS, 10)
     : 30 * 1000,

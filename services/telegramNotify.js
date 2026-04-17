@@ -1,4 +1,6 @@
 /* global fetch */
+const path = require('path');
+const crypto = require('crypto');
 const config = require('../config');
 
 const TG_API = 'https://api.telegram.org';
@@ -18,6 +20,93 @@ function escapeHtml(text) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
+}
+
+function inferSupabaseBucketNameFromPublicBaseUrl(publicBaseUrl) {
+  if (!publicBaseUrl) return null;
+  const s = String(publicBaseUrl);
+  const m = s.match(/\/storage\/v1\/object\/public\/([^/?#]+)\/?$/i);
+  return m ? m[1] : null;
+}
+
+function safeFilenameFromUrl(url, fallback) {
+  try {
+    const u = new URL(url);
+    const base = path.basename(u.pathname);
+    if (base && base !== '/' && base !== '.' && base !== '..') return base;
+    return fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function extFromContentType(contentType) {
+  const ct = (contentType || '').toLowerCase();
+  if (ct.includes('application/pdf')) return '.pdf';
+  if (ct.includes('application/json')) return '.json';
+  if (ct.includes('text/html')) return '.html';
+  if (ct.includes('text/plain')) return '.txt';
+  if (ct.includes('application/zip')) return '.zip';
+  if (ct.includes('image/png')) return '.png';
+  if (ct.includes('image/jpeg')) return '.jpg';
+  return '';
+}
+
+async function materializeReportToStorageUrl(
+  supabase,
+  upload,
+  reportUrl,
+  kind
+) {
+  if (!supabase || !reportUrl) return reportUrl;
+
+  const bucket =
+    config.reportsStorageBucketName ||
+    inferSupabaseBucketNameFromPublicBaseUrl(config.essayStorageBucket);
+  if (!bucket) return reportUrl;
+
+  let res;
+  try {
+    res = await fetch(String(reportUrl));
+  } catch (err) {
+    return reportUrl;
+  }
+
+  if (!res.ok) {
+    return reportUrl;
+  }
+
+  const contentType = res.headers.get('content-type') || undefined;
+  const buf = Buffer.from(await res.arrayBuffer());
+  const ext = extFromContentType(contentType);
+  const original = safeFilenameFromUrl(
+    reportUrl,
+    `${kind || 'report'}${ext || ''}`
+  );
+  const base = path.parse(original).name || `${kind || 'report'}`;
+  const finalName = `${base}${ext || path.extname(original) || ''}`;
+  const objectPath = [
+    'reports',
+    String(upload && upload.user_id ? upload.user_id : 'unknown-user'),
+    String(upload && upload.id ? upload.id : 'unknown-upload'),
+    `${kind || 'report'}-${Date.now()}-${crypto
+      .randomBytes(6)
+      .toString('hex')}-${finalName}`,
+  ].join('/');
+
+  const { error: upErr } = await supabase.storage
+    .from(bucket)
+    .upload(objectPath, buf, {
+      contentType,
+      upsert: true,
+    });
+  if (upErr) {
+    return reportUrl;
+  }
+
+  const { data: pub } = supabase.storage.from(bucket).getPublicUrl(objectPath);
+  const publicUrl = pub && pub.publicUrl ? String(pub.publicUrl) : '';
+  return publicUrl || reportUrl;
 }
 
 async function resolveTelegramChatId(supabase, userId) {
@@ -105,15 +194,35 @@ async function notifyEssayUploadOutcome(supabase, upload, { outcome, detail }) {
     const report2 = completion.report_2_url
       ? String(completion.report_2_url)
       : '';
+
+    const report1Stored = report1
+      ? await materializeReportToStorageUrl(
+          supabase,
+          upload,
+          report1,
+          'similarity'
+        )
+      : '';
+    const report2Stored = report2
+      ? await materializeReportToStorageUrl(
+          supabase,
+          upload,
+          report2,
+          'ai-detection'
+        )
+      : '';
+
     if (report1 || report2) {
       lines.push('📎 <b>Download Reports:</b>');
       lines.push('');
-      if (report1) {
-        lines.push(`📄 <a href="${escapeHtml(report1)}">Similarity Report</a>`);
-      }
-      if (report2) {
+      if (report1Stored) {
         lines.push(
-          `🤖 <a href="${escapeHtml(report2)}">AI Detection Report</a>`
+          `📄 <a href="${escapeHtml(report1Stored)}">Similarity Report</a>`
+        );
+      }
+      if (report2Stored) {
+        lines.push(
+          `🤖 <a href="${escapeHtml(report2Stored)}">AI Detection Report</a>`
         );
       }
     }
